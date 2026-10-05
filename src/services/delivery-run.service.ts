@@ -36,7 +36,7 @@ export interface CancelRunResult extends DeliveryRun {
   /** Orders that were still DISPATCHED and went back to READY. */
   released: string[];
   /** Orders the courier had already moved on; left exactly as they were. */
-  left: { orderId: string; status: OrderStatus }[];
+  left: { orderId: string; currentStatus: OrderStatus }[];
 }
 
 /**
@@ -63,7 +63,7 @@ export function cancelRun(db: Db, runId: string): CancelRunResult {
     if (result?.applied) {
       released.push(orderId);
     } else {
-      left.push({ orderId, status: order.status });
+      left.push({ orderId, currentStatus: order.status });
     }
   }
   db.updateRun(run.id, { state: "CANCELLED" });
