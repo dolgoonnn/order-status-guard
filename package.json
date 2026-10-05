@@ -1,0 +1,23 @@
+{
+  "name": "order-status-guard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tiny synthetic order service showing why a written rule for AI coding agents needs an automatic check. Contains clearly labelled seeded defects.",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "measure": "tsx scripts/measure.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
