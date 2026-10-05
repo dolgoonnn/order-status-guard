@@ -1,6 +1,6 @@
-import { nextStatus } from "../domain/status.js";
 import { NotAllowedError, NotFoundError } from "../errors.js";
 import type { Db, Order, OrderItem } from "../store.js";
+import { changeStatusForHuman } from "./status-change.js";
 
 export interface CreateOrderInput {
   customerId: string;
@@ -11,15 +11,7 @@ export function createOrder(db: Db, input: CreateOrderInput): Order {
   if (input.items.length === 0) {
     throw new NotAllowedError("An order needs at least one item");
   }
-  const order: Order = {
-    id: db.nextId("ord"),
-    customerId: input.customerId,
-    status: "PENDING", // initial state
-    runId: null,
-    createdAt: new Date().toISOString(),
-  };
-  db.insertOrder(order, input.items);
-  return order;
+  return db.createOrder(input);
 }
 
 /** Customer cancels their own order. Goes through the status graph. */
@@ -36,18 +28,12 @@ export function cancelOrderAsCustomer(
   if (order.status !== "PENDING" && order.status !== "PAID") {
     throw new NotAllowedError("This order can no longer be cancelled");
   }
-  const status = nextStatus(order.status, "cancel");
-  db.updateOrder(order.id, { status });
-  return { ...order, status };
+  return changeStatusForHuman(db, order.id, "cancel");
 }
 
 /** Warehouse marks a paid order as packed and ready. Goes through the graph. */
 export function markOrderReady(db: Db, orderId: string): Order {
-  const order = db.findOrder(orderId);
-  if (!order) throw new NotFoundError("Order");
-  const status = nextStatus(order.status, "markReady");
-  db.updateOrder(order.id, { status });
-  return { ...order, status };
+  return changeStatusForHuman(db, orderId, "markReady");
 }
 
 /** Admin cancels an order. */
@@ -59,7 +45,5 @@ export function cancelOrderAsAdmin(db: Db, orderId: string): Order {
   if (!cancellable.includes(order.status)) {
     throw new NotAllowedError("This order can no longer be cancelled");
   }
-  const status = nextStatus(order.status, "cancel");
-  db.updateOrder(order.id, { status });
-  return { ...order, status };
+  return changeStatusForHuman(db, order.id, "cancel");
 }

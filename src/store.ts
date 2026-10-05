@@ -114,14 +114,14 @@ export class Db {
     return (this.items.get(orderId) ?? []).map((item) => ({ ...item }));
   }
 
-  updateOrder(id: string, patch: Partial<Omit<Order, "id">>): void {
+  updateOrder(id: string, patch: OrderPatch): void {
     this.queryCount += 1;
     const order = this.orders.get(id);
     if (!order) throw new Error(`Order ${id} not found`);
     this.orders.set(id, { ...order, ...patch });
   }
 
-  updateOrders(ids: string[], patch: Partial<Omit<Order, "id">>): void {
+  updateOrders(ids: string[], patch: OrderPatch): void {
     this.queryCount += 1;
     for (const id of ids) {
       const order = this.orders.get(id);
