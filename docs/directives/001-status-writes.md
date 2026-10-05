@@ -1,6 +1,6 @@
 # Directive 001: status writes
 
-Version: 1 (initial)
+Version: 2 (version 1 plus review round 1, added after reviewing commits 36eb924 to 58b442f)
 
 ## Context
 
@@ -122,3 +122,34 @@ The human reviewer will:
   while the order is `IN_TRANSIT`). Do not add an edge. Treat the event as not
   applied, and report it.
 - An existing test looks wrong, not merely out of date.
+
+## Review round 1
+
+Added after reviewing the first implementation. Requirements 1 to 8 stand.
+
+9. **`Db.insertOrder` is creation-only.** Today it replaces an existing order,
+   status included: a `DELIVERED` order went back to `PENDING` through it with
+   no transition, and none of the three checks noticed. It must refuse an id
+   that already exists. Add a test. `scripts/measure.ts` uses `insertOrder`
+   for new ids only and must keep working unchanged.
+10. **`RETURNED_TO_DEPOT` is never applied.** Remove the mapping to
+    `undispatch`. `READY` means packed at our warehouse and ready to batch; a
+    parcel at the carrier's depot is not that, and marking it `READY` would let
+    it be batched into a run the courier can't collect. The event returns 200
+    with "not applied" from every status. Giving returns their own move in the
+    graph is a separate decision, out of scope here.
+11. **The guard test must not be able to pass while checking nothing.** It must
+    also assert that it scanned source files and found the allowed status
+    writes in `src/store.ts`.
+
+Accepted as they are: the pre-check added to `dispatchRun`, and the
+`{ applied, reason, order }` response for callbacks from other services.
+
+Additional acceptance criteria:
+
+- [ ] Calling `insertOrder` with an existing id fails, and a test covers it.
+- [ ] A test shows `RETURNED_TO_DEPOT` changes nothing from every status.
+- [ ] The guard test fails if its file list is empty or the allowed writer is
+      not found.
+- [ ] `pnpm typecheck`, `pnpm test` and `pnpm measure after` still pass, with
+      the same numbers as before.
