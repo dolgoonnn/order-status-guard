@@ -78,21 +78,12 @@ describe("carrier events", () => {
     expect(response.body.applied).toBe(false);
   });
 
-  it("applies RETURNED_TO_DEPOT only while the order is DISPATCHED", async () => {
-    const { api, order } = await dispatched();
-    await api.post("/internal/carrier/events", carrier(order.id, "PICKED_UP"));
-
-    const whileInTransit = await api.post<EventBody>("/internal/carrier/events", carrier(order.id, "RETURNED_TO_DEPOT"));
-    expect(whileInTransit.status).toBe(200);
-    expect(whileInTransit.body.applied).toBe(false);
-    expect((await api.view(order.id)).status).toBe("IN_TRANSIT");
-  });
-
-  it("applies RETURNED_TO_DEPOT for a DISPATCHED order", async () => {
+  it("never applies RETURNED_TO_DEPOT, even for a DISPATCHED order", async () => {
     const { api, order } = await dispatched();
     const response = await api.post<EventBody>("/internal/carrier/events", carrier(order.id, "RETURNED_TO_DEPOT"));
-    expect(response.body.applied).toBe(true);
-    expect((await api.view(order.id)).status).toBe("READY");
+    expect(response.status).toBe(200);
+    expect(response.body.applied).toBe(false);
+    expect((await api.view(order.id)).status).toBe("DISPATCHED");
   });
 });
 
@@ -125,17 +116,29 @@ describe("cancelling a run after some orders were picked up", () => {
     expect((await api.view(delivered.id)).status).toBe("DELIVERED");
   });
 
-  it("does not release an order that was handed to a newer run", async () => {
+  it("does not release an order that now belongs to a newer run", async () => {
+    const api = createTestApi();
+    const first = await api.orderToReady();
+    // Seeded: the order is DISPATCHED in run-b, but run-a still lists it.
+    api.db.insertRun({ id: "run-b", orderIds: [first.id], state: "DISPATCHED" });
+    api.db.insertRun({ id: "run-a", orderIds: [first.id], state: "DISPATCHED" });
+    api.db.transition(first.id, "dispatch", { runId: "run-b" });
+
+    const cancelled = await api.post<CancelRunBody>("/admin/runs/run-a/cancel");
+    expect(cancelled.body.released).toEqual([]);
+    expect((await api.view(first.id)).status).toBe("DISPATCHED");
+    expect((await api.view(first.id)).runId).toBe("run-b");
+  });
+});
+
+describe("order creation", () => {
+  it("insertOrder refuses an id that already exists and changes nothing", async () => {
     const api = createTestApi();
     const order = await api.orderToReady();
-    const first = await api.post<DeliveryRun>("/admin/runs", { orderIds: [order.id] });
-    await api.post("/internal/carrier/events", carrier(order.id, "RETURNED_TO_DEPOT"));
-    const second = await api.post<DeliveryRun>("/admin/runs", { orderIds: [order.id] });
-
-    const cancelled = await api.post<CancelRunBody>(`/admin/runs/${first.body.id}/cancel`);
-    expect(cancelled.body.released).toEqual([]);
-    expect((await api.view(order.id)).status).toBe("DISPATCHED");
-    expect((await api.view(order.id)).runId).toBe(second.body.id);
+    await api.post("/admin/runs", { orderIds: [order.id] });
+    const before = api.db.findOrder(order.id);
+    expect(() => api.db.insertOrder({ ...order, status: "PENDING" }, [])).toThrow(/already exists/);
+    expect(api.db.findOrder(order.id)).toEqual(before);
   });
 });
 

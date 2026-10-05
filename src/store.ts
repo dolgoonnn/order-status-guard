@@ -53,8 +53,12 @@ export class Db {
     return `${prefix}-${String(this.sequence).padStart(4, "0")}`;
   }
 
+  /** Creation only: refuses an id that exists, so it cannot rewrite a status. */
   insertOrder(order: Order, items: OrderItem[]): void {
     this.queryCount += 1;
+    if (this.orders.has(order.id)) {
+      throw new Error(`Order ${order.id} already exists`);
+    }
     this.orders.set(order.id, { ...order });
     this.items.set(order.id, items.map((item) => ({ ...item })));
   }

@@ -1,4 +1,5 @@
 import type { TransitionName } from "../domain/status.js";
+import { NotFoundError } from "../errors.js";
 import type { Db } from "../store.js";
 import { changeStatusForEvent, type EventOutcome } from "./status-change.js";
 
@@ -10,10 +11,15 @@ export const CARRIER_EVENTS = [
 
 export type CarrierEvent = (typeof CARRIER_EVENTS)[number];
 
-const TRANSITION_BY_EVENT: Record<CarrierEvent, TransitionName> = {
+/**
+ * RETURNED_TO_DEPOT has no move: READY means packed at our warehouse, and a
+ * parcel at the carrier's depot is not that. Returns need their own move in
+ * the graph, which is a separate decision.
+ */
+const TRANSITION_BY_EVENT: Record<CarrierEvent, TransitionName | null> = {
   PICKED_UP: "pickUp",
   DELIVERED: "deliver",
-  RETURNED_TO_DEPOT: "undispatch",
+  RETURNED_TO_DEPOT: null,
 };
 
 export function isCarrierEvent(value: unknown): value is CarrierEvent {
@@ -33,5 +39,15 @@ export function handleCarrierEvent(
   orderId: string,
   event: CarrierEvent,
 ): EventOutcome {
-  return changeStatusForEvent(db, orderId, TRANSITION_BY_EVENT[event]);
+  const transition = TRANSITION_BY_EVENT[event];
+  if (transition === null) {
+    const order = db.findOrder(orderId);
+    if (!order) throw new NotFoundError("Order");
+    return {
+      applied: false,
+      reason: `"${event}" has no move in the status graph`,
+      order,
+    };
+  }
+  return changeStatusForEvent(db, orderId, transition);
 }

@@ -18,8 +18,18 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
+const files = sourceFiles(join(root, "src"));
+
+/** Allowed writes found in the writer file, as "method:line". */
+function allowedWrites(): string[] {
+  const text = readFileSync(join(root, WRITER_FILE), "utf8");
+  return findStatusWrites(WRITER_FILE, text)
+    .filter((write) => write.inside && ALLOWED_INSIDE.has(write.inside))
+    .map((write) => `${write.inside}:${write.line}`);
+}
+
 function violations(): string[] {
-  return sourceFiles(join(root, "src")).flatMap((path) => {
+  return files.flatMap((path) => {
     const file = relative(root, path);
     return findStatusWrites(file, readFileSync(path, "utf8"))
       .filter(
@@ -36,6 +46,16 @@ function violations(): string[] {
 }
 
 describe("only Db.transition writes an order status", () => {
+  it("really scanned the source, and found the allowed writes", () => {
+    const names = files.map((path) => relative(root, path));
+    expect(names.length).toBeGreaterThanOrEqual(5);
+    expect(names).toContain(WRITER_FILE);
+    expect(names).toContain("src/services/payment.service.ts");
+    const inside = allowedWrites().map((entry) => entry.split(":")[0]);
+    expect(inside).toContain("transition");
+    expect(inside).toContain("createOrder");
+  });
+
   it("finds no direct status write under src/", () => {
     expect(violations(), violations().join("\n")).toEqual([]);
   });

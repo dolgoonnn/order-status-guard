@@ -19,8 +19,8 @@ interface Caller {
   name: string;
   /** "service" callers retry and arrive late; "human" callers get errors. */
   kind: "service" | "human";
-  /** The graph move this caller asks for. */
-  transition: TransitionName;
+  /** The graph move this caller asks for; null when it has none. */
+  transition: TransitionName | null;
   /** True when a failed move has other rules in front of the graph (defect B). */
   hasOwnCancelRule?: boolean;
   path: (orderId: string, runId: string) => string;
@@ -52,7 +52,7 @@ const CALLERS: Caller[] = [
   {
     name: "carrier: RETURNED_TO_DEPOT",
     kind: "service",
-    transition: "undispatch",
+    transition: null,
     path: () => "/internal/carrier/events",
     body: (orderId) => ({ orderId, event: "RETURNED_TO_DEPOT" }),
   },
@@ -130,12 +130,12 @@ describe("every caller, from every starting status", () => {
           expect(to === from || LEGAL_EDGES.has(`${from}>${to}`)).toBe(true);
 
           // 2. If the graph allows the move, a legal start really moves.
-          if (canFire(from, caller.transition) && !caller.hasOwnCancelRule) {
+          if (caller.transition && canFire(from, caller.transition) && !caller.hasOwnCancelRule) {
             expect(to).toBe(TRANSITIONS[caller.transition].to);
           }
 
           // 3. If the graph forbids it, nothing changes.
-          if (!canFire(from, caller.transition)) {
+          if (!caller.transition || !canFire(from, caller.transition)) {
             expect(to).toBe(from);
           }
 
@@ -155,6 +155,20 @@ describe("every caller, from every starting status", () => {
           }
         });
       }
+    });
+  }
+});
+
+describe("RETURNED_TO_DEPOT", () => {
+  const returned = CALLERS.find((c) => c.name === "carrier: RETURNED_TO_DEPOT");
+  for (const from of ORDER_STATUSES) {
+    it(`changes nothing from ${from}`, async () => {
+      expect(returned).toBeDefined();
+      if (!returned) return;
+      const { httpStatus, body, to } = await fire(returned, from);
+      expect(httpStatus).toBe(200);
+      expect(body.applied).toBe(false);
+      expect(to).toBe(from);
     });
   }
 });
