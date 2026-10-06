@@ -1,0 +1,129 @@
+diff --git a/src/domain/status.ts b/src/domain/status.ts
+index 0a40059..abddeff 100644
+--- a/src/domain/status.ts
++++ b/src/domain/status.ts
+@@ -11,6 +11,7 @@ export const ORDER_STATUSES = [
+   "IN_TRANSIT",
+   "DELIVERED",
+   "CANCELLED",
++  "RETURNED",
+ ] as const;
+ 
+ export type OrderStatus = (typeof ORDER_STATUSES)[number];
+@@ -27,6 +28,7 @@ export const TRANSITIONS = {
+   undispatch: { from: ["DISPATCHED"], to: "READY" },
+   pickUp: { from: ["DISPATCHED"], to: "IN_TRANSIT" },
+   deliver: { from: ["IN_TRANSIT"], to: "DELIVERED" },
++  returnToDepot: { from: ["IN_TRANSIT"], to: "RETURNED" },
+   cancel: { from: ["PENDING", "PAID", "READY"], to: "CANCELLED" },
+ } as const satisfies Record<string, Transition>;
+ 
+diff --git a/src/services/carrier.service.ts b/src/services/carrier.service.ts
+index 4a5014e..ec1f40d 100644
+--- a/src/services/carrier.service.ts
++++ b/src/services/carrier.service.ts
+@@ -11,15 +11,11 @@ export const CARRIER_EVENTS = [
+ 
+ export type CarrierEvent = (typeof CARRIER_EVENTS)[number];
+ 
+-/**
+- * RETURNED_TO_DEPOT has no move: READY means packed at our warehouse, and a
+- * parcel at the carrier's depot is not that. Returns need their own move in
+- * the graph, which is a separate decision.
+- */
++/** RETURNED_TO_DEPOT moves an IN_TRANSIT order to the terminal RETURNED status. */
+ const TRANSITION_BY_EVENT: Record<CarrierEvent, TransitionName | null> = {
+   PICKED_UP: "pickUp",
+   DELIVERED: "deliver",
+-  RETURNED_TO_DEPOT: null,
++  RETURNED_TO_DEPOT: "returnToDepot",
+ };
+ 
+ export function isCarrierEvent(value: unknown): value is CarrierEvent {
+diff --git a/tests/every-caller.test.ts b/tests/every-caller.test.ts
+index b32c5ae..da87399 100644
+--- a/tests/every-caller.test.ts
++++ b/tests/every-caller.test.ts
+@@ -52,7 +52,7 @@ const CALLERS: Caller[] = [
+   {
+     name: "carrier: RETURNED_TO_DEPOT",
+     kind: "service",
+-    transition: null,
++    transition: "returnToDepot",
+     path: () => "/internal/carrier/events",
+     body: (orderId) => ({ orderId, event: "RETURNED_TO_DEPOT" }),
+   },
+@@ -162,13 +162,26 @@ describe("every caller, from every starting status", () => {
+ describe("RETURNED_TO_DEPOT", () => {
+   const returned = CALLERS.find((c) => c.name === "carrier: RETURNED_TO_DEPOT");
+   for (const from of ORDER_STATUSES) {
+-    it(`changes nothing from ${from}`, async () => {
++    const applies = from === "IN_TRANSIT";
++    it(`${applies ? "moves to RETURNED" : "changes nothing"} from ${from}`, async () => {
+       expect(returned).toBeDefined();
+       if (!returned) return;
+       const { httpStatus, body, to } = await fire(returned, from);
+       expect(httpStatus).toBe(200);
+-      expect(body.applied).toBe(false);
+-      expect(to).toBe(from);
++      expect(body.applied).toBe(applies);
++      expect(to).toBe(applies ? "RETURNED" : from);
++    });
++  }
++});
++
++describe("a RETURNED order is terminal", () => {
++  for (const name of ["admin: cancel order", "customer: cancel order", "admin: dispatch run", "carrier: DELIVERED"]) {
++    it(`${name} changes nothing`, async () => {
++      const caller = CALLERS.find((c) => c.name === name);
++      expect(caller).toBeDefined();
++      if (!caller) return;
++      const { to } = await fire(caller, "RETURNED");
++      expect(to).toBe("RETURNED");
+     });
+   }
+ });
+diff --git a/tests/status-callbacks.test.ts b/tests/status-callbacks.test.ts
+index 9552bfe..fda7eac 100644
+--- a/tests/status-callbacks.test.ts
++++ b/tests/status-callbacks.test.ts
+@@ -78,15 +78,37 @@ describe("carrier events", () => {
+     expect(response.body.applied).toBe(false);
+   });
+ 
+-  it("never applies RETURNED_TO_DEPOT, even for a DISPATCHED order", async () => {
++  it("moves an IN_TRANSIT order to RETURNED on RETURNED_TO_DEPOT", async () => {
++    const { api, order } = await dispatched();
++    await api.post("/internal/carrier/events", carrier(order.id, "PICKED_UP"));
++    const response = await api.post<EventBody>("/internal/carrier/events", carrier(order.id, "RETURNED_TO_DEPOT"));
++    expect(response.status).toBe(200);
++    expect(response.body.applied).toBe(true);
++    expect(response.body.order.status).toBe("RETURNED");
++    const repeat = await api.post<EventBody>("/internal/carrier/events", carrier(order.id, "RETURNED_TO_DEPOT"));
++    expect(repeat.body.applied).toBe(false);
++    expect((await api.view(order.id)).status).toBe("RETURNED");
++  });
++
++  it("does not apply RETURNED_TO_DEPOT to a DISPATCHED order", async () => {
+     const { api, order } = await dispatched();
+     const response = await api.post<EventBody>("/internal/carrier/events", carrier(order.id, "RETURNED_TO_DEPOT"));
+     expect(response.status).toBe(200);
+     expect(response.body.applied).toBe(false);
+     expect((await api.view(order.id)).status).toBe("DISPATCHED");
+   });
+-});
+ 
++  it("leaves a RETURNED order terminal", async () => {
++    const { api, order } = await dispatched();
++    await api.post("/internal/carrier/events", carrier(order.id, "PICKED_UP"));
++    await api.post("/internal/carrier/events", carrier(order.id, "RETURNED_TO_DEPOT"));
++    const late = await api.post<EventBody>("/internal/carrier/events", carrier(order.id, "DELIVERED"));
++    expect(late.body.applied).toBe(false);
++    const cancel = await api.post(`/admin/orders/${order.id}/cancel`);
++    expect([400, 409]).toContain(cancel.status);
++    expect((await api.view(order.id)).status).toBe("RETURNED");
++  });
++});
+ describe("cancelling a run after some orders were picked up", () => {
+   it("releases the DISPATCHED orders and leaves the rest alone", async () => {
+     const api = createTestApi();
