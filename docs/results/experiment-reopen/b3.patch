@@ -1,0 +1,85 @@
+diff --git a/src/app.ts b/src/app.ts
+index 9b13d80..a617fab 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -12,6 +12,7 @@ import {
+   cancelOrderAsCustomer,
+   createOrder,
+   markOrderReady,
++  reopenOrderAsAdmin,
+ } from "./services/order.service.js";
+ import { handleInvoicePaid } from "./services/payment.service.js";
+ import type { Db, OrderItem } from "./store.js";
+@@ -85,6 +86,10 @@ export function createApp(db: Db): Hono {
+     c.json(cancelOrderAsAdmin(db, c.req.param("id"))),
+   );
+ 
++  app.post("/admin/orders/:id/reopen", (c) =>
++    c.json(reopenOrderAsAdmin(db, c.req.param("id"))),
++  );
++
+   app.post("/admin/runs", async (c) => {
+     const body: unknown = await c.req.json();
+     const orderIds = isRecord(body) ? body.orderIds : undefined;
+diff --git a/src/domain/status.ts b/src/domain/status.ts
+index 0a40059..3d52c2b 100644
+--- a/src/domain/status.ts
++++ b/src/domain/status.ts
+@@ -28,6 +28,7 @@ export const TRANSITIONS = {
+   pickUp: { from: ["DISPATCHED"], to: "IN_TRANSIT" },
+   deliver: { from: ["IN_TRANSIT"], to: "DELIVERED" },
+   cancel: { from: ["PENDING", "PAID", "READY"], to: "CANCELLED" },
++  reopen: { from: ["CANCELLED"], to: "PENDING" },
+ } as const satisfies Record<string, Transition>;
+ 
+ export type TransitionName = keyof typeof TRANSITIONS;
+diff --git a/src/services/order.service.ts b/src/services/order.service.ts
+index de2169c..ce019e0 100644
+--- a/src/services/order.service.ts
++++ b/src/services/order.service.ts
+@@ -63,3 +63,12 @@ export function cancelOrderAsAdmin(db: Db, orderId: string): Order {
+   db.updateOrder(order.id, { status });
+   return { ...order, status };
+ }
++
++/** Admin reopens a cancelled order, e.g. a customer cancelled by mistake. */
++export function reopenOrderAsAdmin(db: Db, orderId: string): Order {
++  const order = db.findOrder(orderId);
++  if (!order) throw new NotFoundError("Order");
++  const status = nextStatus(order.status, "reopen");
++  db.updateOrder(order.id, { status });
++  return { ...order, status };
++}
+diff --git a/tests/order-flow.test.ts b/tests/order-flow.test.ts
+index 5fcfa52..e2a47f3 100644
+--- a/tests/order-flow.test.ts
++++ b/tests/order-flow.test.ts
+@@ -71,4 +71,28 @@ describe("order flow", () => {
+     expect(list.body).toHaveLength(2);
+     expect(list.body[0]?.total).toBe(54000);
+   });
++
++  it("lets an admin reopen a cancelled order", async () => {
++    const api = createTestApi();
++    const order = await api.createOrder("cus-7");
++    await api.post(`/orders/${order.id}/cancel`, { customerId: "cus-7" });
++
++    const reopened = await api.post<Order>(`/admin/orders/${order.id}/reopen`);
++    expect(reopened.status).toBe(200);
++    expect(reopened.body.status).toBe("PENDING");
++    expect((await api.view(order.id)).status).toBe("PENDING");
++  });
++
++  it("rejects reopening an order that is not cancelled", async () => {
++    const api = createTestApi();
++    const order = await api.createOrder();
++    const response = await api.post(`/admin/orders/${order.id}/reopen`);
++    expect(response.status).toBe(409);
++  });
++
++  it("returns 404 when reopening an unknown order", async () => {
++    const api = createTestApi();
++    const response = await api.post("/admin/orders/ord-9999/reopen");
++    expect(response.status).toBe(404);
++  });
+ });
