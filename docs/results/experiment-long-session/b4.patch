@@ -1,0 +1,458 @@
+diff --git a/src/app.ts b/src/app.ts
+index 9b13d80..5d3fd50 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1,19 +1,19 @@
+ import { Hono } from "hono";
+ import { IllegalTransitionError } from "./domain/status.js";
+-import { NotAllowedError, NotFoundError } from "./errors.js";
++import { NotFoundError, ValidationError } from "./errors.js";
+ import {
+   handleCarrierEvent,
+   isCarrierEvent,
+ } from "./services/carrier.service.js";
+ import { cancelRun, dispatchRun } from "./services/delivery-run.service.js";
+-import { getOrder, listOrders } from "./services/order-query.service.js";
++import { countOrders, getOrder, listOrders } from "./services/order-query.service.js";
+ import {
+   cancelOrderAsAdmin,
+   cancelOrderAsCustomer,
+   createOrder,
+   markOrderReady,
+ } from "./services/order.service.js";
+-import { handleInvoicePaid } from "./services/payment.service.js";
++import { handleInvoiceExpired, handleInvoicePaid } from "./services/payment.service.js";
+ import type { Db, OrderItem } from "./store.js";
+ 
+ function isRecord(value: unknown): value is Record<string, unknown> {
+@@ -21,7 +21,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
+ }
+ 
+ function parseItems(value: unknown): OrderItem[] {
+-  if (!Array.isArray(value)) throw new NotAllowedError("items must be a list");
++  if (!Array.isArray(value)) throw new ValidationError("items must be a list");
+   return value.map((raw) => {
+     if (
+       !isRecord(raw) ||
+@@ -29,7 +29,7 @@ function parseItems(value: unknown): OrderItem[] {
+       typeof raw.quantity !== "number" ||
+       typeof raw.unitPrice !== "number"
+     ) {
+-      throw new NotAllowedError("Each item needs sku, quantity and unitPrice");
++      throw new ValidationError("Each item needs sku, quantity and unitPrice");
+     }
+     return { sku: raw.sku, quantity: raw.quantity, unitPrice: raw.unitPrice };
+   });
+@@ -37,11 +37,25 @@ function parseItems(value: unknown): OrderItem[] {
+ 
+ function requireString(body: unknown, field: string): string {
+   if (!isRecord(body) || typeof body[field] !== "string") {
+-    throw new NotAllowedError(`${field} is required`);
++    throw new ValidationError(`${field} is required`);
+   }
+   return body[field];
+ }
+ 
++const MAX_NOTE_LENGTH = 200;
++
++function parseNote(body: unknown): string | undefined {
++  const note = isRecord(body) ? body.note : undefined;
++  if (note === undefined) return undefined;
++  if (typeof note !== "string") {
++    throw new ValidationError("note must be a string.");
++  }
++  if (note.length > MAX_NOTE_LENGTH) {
++    throw new ValidationError("note must be at most 200 characters.");
++  }
++  return note;
++}
++
+ export function createApp(db: Db): Hono {
+   const app = new Hono();
+ 
+@@ -49,7 +63,7 @@ export function createApp(db: Db): Hono {
+     if (error instanceof NotFoundError) {
+       return c.json({ error: error.message }, 404);
+     }
+-    if (error instanceof NotAllowedError) {
++    if (error instanceof ValidationError) {
+       return c.json({ error: error.message }, 400);
+     }
+     if (error instanceof IllegalTransitionError) {
+@@ -59,12 +73,22 @@ export function createApp(db: Db): Hono {
+     return c.json({ error: "Internal error" }, 500);
+   });
+ 
++  app.get("/health", (c) => c.json({ ok: true, orders: countOrders(db) }));
++
+   // Customers
+   app.post("/orders", async (c) => {
+     const body: unknown = await c.req.json();
+     const customerId = requireString(body, "customerId");
+     const items = parseItems(isRecord(body) ? body.items : undefined);
+-    return c.json(createOrder(db, { customerId, items }), 201);
++    const note = parseNote(body);
++    return c.json(
++      createOrder(db, {
++        customerId,
++        items,
++        ...(note === undefined ? {} : { note }),
++      }),
++      201,
++    );
+   });
+ 
+   app.get("/orders/:id", (c) => c.json(getOrder(db, c.req.param("id"))));
+@@ -75,7 +99,7 @@ export function createApp(db: Db): Hono {
+   });
+ 
+   // Admin
+-  app.get("/admin/orders", (c) => c.json(listOrders(db)));
++  app.get("/admin/orders", (c) => c.json(listOrders(db, c.req.query("customerId"))));
+ 
+   app.post("/admin/orders/:id/ready", (c) =>
+     c.json(markOrderReady(db, c.req.param("id"))),
+@@ -92,7 +116,7 @@ export function createApp(db: Db): Hono {
+       !Array.isArray(orderIds) ||
+       !orderIds.every((id): id is string => typeof id === "string")
+     ) {
+-      throw new NotAllowedError("orderIds must be a list of ids");
++      throw new ValidationError("orderIds must be a list of ids");
+     }
+     return c.json(dispatchRun(db, orderIds), 201);
+   });
+@@ -107,12 +131,17 @@ export function createApp(db: Db): Hono {
+     return c.json(handleInvoicePaid(db, orderId));
+   });
+ 
++  app.post("/internal/payments/invoice-expired", async (c) => {
++    const orderId = requireString(await c.req.json(), "orderId");
++    return c.json(handleInvoiceExpired(db, orderId));
++  });
++
+   app.post("/internal/carrier/events", async (c) => {
+     const body: unknown = await c.req.json();
+     const orderId = requireString(body, "orderId");
+     const event = isRecord(body) ? body.event : undefined;
+     if (!isCarrierEvent(event)) {
+-      throw new NotAllowedError("Unknown carrier event");
++      throw new ValidationError("Unknown carrier event");
+     }
+     return c.json(handleCarrierEvent(db, orderId, event));
+   });
+diff --git a/src/errors.ts b/src/errors.ts
+index 2a566e6..2556348 100644
+--- a/src/errors.ts
++++ b/src/errors.ts
+@@ -5,9 +5,9 @@ export class NotFoundError extends Error {
+   }
+ }
+ 
+-export class NotAllowedError extends Error {
++export class ValidationError extends Error {
+   constructor(message: string) {
+     super(message);
+-    this.name = "NotAllowedError";
++    this.name = "ValidationError";
+   }
+ }
+diff --git a/src/services/carrier.service.ts b/src/services/carrier.service.ts
+index 856733a..1c531e0 100644
+--- a/src/services/carrier.service.ts
++++ b/src/services/carrier.service.ts
+@@ -1,5 +1,5 @@
+ import type { OrderStatus } from "../domain/status.js";
+-import { NotAllowedError, NotFoundError } from "../errors.js";
++import { NotFoundError, ValidationError } from "../errors.js";
+ import type { Db, Order } from "../store.js";
+ 
+ export const CARRIER_EVENTS = [
+@@ -35,7 +35,7 @@ export function handleCarrierEvent(
+   const order = db.findOrder(orderId);
+   if (!order) throw new NotFoundError("Order");
+   if (order.status === "CANCELLED") {
+-    throw new NotAllowedError("Order is cancelled");
++    throw new ValidationError("Order is cancelled");
+   }
+   // SEEDED DEFECT A3: writes the mapped status directly instead of using the
+   // graph. A late PICKED_UP after DELIVERED moves the order back to IN_TRANSIT.
+diff --git a/src/services/delivery-run.service.ts b/src/services/delivery-run.service.ts
+index 4308bab..255f9b5 100644
+--- a/src/services/delivery-run.service.ts
++++ b/src/services/delivery-run.service.ts
+@@ -1,11 +1,11 @@
+ import { nextStatus } from "../domain/status.js";
+-import { NotAllowedError, NotFoundError } from "../errors.js";
++import { NotFoundError, ValidationError } from "../errors.js";
+ import type { Db, DeliveryRun } from "../store.js";
+ 
+ /** Batches READY orders into one courier run. Goes through the status graph. */
+ export function dispatchRun(db: Db, orderIds: string[]): DeliveryRun {
+   if (orderIds.length === 0) {
+-    throw new NotAllowedError("A run needs at least one order");
++    throw new ValidationError("A run needs at least one order");
+   }
+   const run: DeliveryRun = {
+     id: db.nextId("run"),
+@@ -30,7 +30,7 @@ export function cancelRun(db: Db, runId: string): DeliveryRun {
+   const run = db.findRun(runId);
+   if (!run) throw new NotFoundError("Run");
+   if (run.state === "CANCELLED") {
+-    throw new NotAllowedError("Run is already cancelled");
++    throw new ValidationError("Run is already cancelled");
+   }
+   // SEEDED DEFECT A1: writes the status directly to every member instead of
+   // using the graph. Orders already IN_TRANSIT or DELIVERED go back to READY.
+diff --git a/src/services/order-query.service.ts b/src/services/order-query.service.ts
+index e781a7a..040d9cb 100644
+--- a/src/services/order-query.service.ts
++++ b/src/services/order-query.service.ts
+@@ -28,9 +28,15 @@ export function getOrder(db: Db, orderId: string): OrderView {
+   return toView(order, db.itemsForOrder(order.id));
+ }
+ 
+-/** Admin order list with totals. */
+-export function listOrders(db: Db): OrderView[] {
+-  const orders = db.listOrders();
++export function countOrders(db: Db): number {
++  return db.listOrders().length;
++}
++
++/** Admin order list with totals, optionally limited to one customer. */
++export function listOrders(db: Db, customerId?: string): OrderView[] {
++  const orders = db
++    .listOrders()
++    .filter((order) => customerId === undefined || order.customerId === customerId);
+   // SEEDED DEFECT C: one extra query per order (N+1) to load its items.
+   return orders.map((order) => toView(order, db.itemsForOrder(order.id)));
+ }
+diff --git a/src/services/order.service.ts b/src/services/order.service.ts
+index de2169c..4ce4d7b 100644
+--- a/src/services/order.service.ts
++++ b/src/services/order.service.ts
+@@ -1,15 +1,16 @@
+ import { nextStatus } from "../domain/status.js";
+-import { NotAllowedError, NotFoundError } from "../errors.js";
++import { NotFoundError, ValidationError } from "../errors.js";
+ import type { Db, Order, OrderItem } from "../store.js";
+ 
+ export interface CreateOrderInput {
+   customerId: string;
+   items: OrderItem[];
++  note?: string;
+ }
+ 
+ export function createOrder(db: Db, input: CreateOrderInput): Order {
+   if (input.items.length === 0) {
+-    throw new NotAllowedError("An order needs at least one item");
++    throw new ValidationError("An order needs at least one item");
+   }
+   const order: Order = {
+     id: db.nextId("ord"),
+@@ -17,6 +18,7 @@ export function createOrder(db: Db, input: CreateOrderInput): Order {
+     status: "PENDING", // initial state
+     runId: null,
+     createdAt: new Date().toISOString(),
++    ...(input.note === undefined ? {} : { note: input.note }),
+   };
+   db.insertOrder(order, input.items);
+   return order;
+@@ -34,7 +36,7 @@ export function cancelOrderAsCustomer(
+   }
+   // SEEDED DEFECT B (duplicated rule, copy 1 of 3): who may cancel, and when.
+   if (order.status !== "PENDING" && order.status !== "PAID") {
+-    throw new NotAllowedError("This order can no longer be cancelled");
++    throw new ValidationError("This order can no longer be cancelled");
+   }
+   const status = nextStatus(order.status, "cancel");
+   db.updateOrder(order.id, { status });
+@@ -57,7 +59,7 @@ export function cancelOrderAsAdmin(db: Db, orderId: string): Order {
+   // SEEDED DEFECT B (duplicated rule, copy 2 of 3): same rule, different list.
+   const cancellable = ["PENDING", "PAID", "READY", "DISPATCHED"];
+   if (!cancellable.includes(order.status)) {
+-    throw new NotAllowedError("This order can no longer be cancelled");
++    throw new ValidationError("This order can no longer be cancelled");
+   }
+   const status = nextStatus(order.status, "cancel");
+   db.updateOrder(order.id, { status });
+diff --git a/src/services/payment.service.ts b/src/services/payment.service.ts
+index 10ad27c..4bfa366 100644
+--- a/src/services/payment.service.ts
++++ b/src/services/payment.service.ts
+@@ -1,3 +1,4 @@
++import { IllegalTransitionError, nextStatus } from "../domain/status.js";
+ import { NotFoundError } from "../errors.js";
+ import type { Db, Order } from "../store.js";
+ 
+@@ -13,3 +14,20 @@ export function handleInvoicePaid(db: Db, orderId: string): Order {
+   db.updateOrder(order.id, { status: "PAID" });
+   return { ...order, status: "PAID" };
+ }
++
++/**
++ * Called by the billing service when an unpaid invoice expires. Only a PENDING
++ * order is cancelled; billing retries, so a CANCELLED order is returned as is.
++ */
++export function handleInvoiceExpired(db: Db, orderId: string): Order {
++  const order = db.findOrder(orderId);
++  if (!order) throw new NotFoundError("Order");
++  if (order.status === "CANCELLED") return order;
++  // A paid or shipped order must survive a stale expiry notice.
++  if (order.status !== "PENDING") {
++    throw new IllegalTransitionError(order.status, "cancel");
++  }
++  const status = nextStatus(order.status, "cancel");
++  db.updateOrder(order.id, { status });
++  return { ...order, status };
++}
+diff --git a/src/store.ts b/src/store.ts
+index 3efecff..ff63de1 100644
+--- a/src/store.ts
++++ b/src/store.ts
+@@ -12,6 +12,7 @@ export interface Order {
+   status: OrderStatus;
+   runId: string | null;
+   createdAt: string;
++  note?: string;
+ }
+ 
+ export type RunState = "DISPATCHED" | "CANCELLED";
+diff --git a/tests/invoice-expired.test.ts b/tests/invoice-expired.test.ts
+new file mode 100644
+index 0000000..b9c9548
+--- /dev/null
++++ b/tests/invoice-expired.test.ts
+@@ -0,0 +1,52 @@
++import { describe, expect, it } from "vitest";
++import { createTestApi, type Order } from "./helpers.js";
++
++describe("invoice expired", () => {
++  it("cancels an unpaid order", async () => {
++    const api = createTestApi();
++    const order = await api.createOrder();
++    const response = await api.post<Order>(
++      "/internal/payments/invoice-expired",
++      { orderId: order.id },
++    );
++    expect(response.status).toBe(200);
++    expect(response.body.status).toBe("CANCELLED");
++    expect((await api.view(order.id)).status).toBe("CANCELLED");
++  });
++
++  it("is idempotent when billing retries", async () => {
++    const api = createTestApi();
++    const order = await api.createOrder();
++    await api.post("/internal/payments/invoice-expired", { orderId: order.id });
++    const again = await api.post<Order>("/internal/payments/invoice-expired", {
++      orderId: order.id,
++    });
++    expect(again.status).toBe(200);
++    expect(again.body.status).toBe("CANCELLED");
++  });
++
++  it("answers 404 for an unknown order", async () => {
++    const api = createTestApi();
++    const response = await api.post("/internal/payments/invoice-expired", {
++      orderId: "ord-9999",
++    });
++    expect(response.status).toBe(404);
++  });
++
++  it("answers 400 when orderId is missing", async () => {
++    const api = createTestApi();
++    const response = await api.post("/internal/payments/invoice-expired", {});
++    expect(response.status).toBe(400);
++  });
++
++  it("does not cancel an order that is already paid", async () => {
++    const api = createTestApi();
++    const order = await api.createOrder();
++    await api.post("/internal/payments/invoice-paid", { orderId: order.id });
++    const response = await api.post("/internal/payments/invoice-expired", {
++      orderId: order.id,
++    });
++    expect(response.status).toBe(409);
++    expect((await api.view(order.id)).status).toBe("PAID");
++  });
++});
+diff --git a/tests/order-note.test.ts b/tests/order-note.test.ts
+new file mode 100644
+index 0000000..002d8d2
+--- /dev/null
++++ b/tests/order-note.test.ts
+@@ -0,0 +1,75 @@
++import { describe, expect, it } from "vitest";
++import { createTestApi, type Order, type OrderView } from "./helpers.js";
++
++const items = [{ sku: "cup", quantity: 1, unitPrice: 30000 }];
++
++describe("order note", () => {
++  it("stores the note and returns it on read", async () => {
++    const api = createTestApi();
++    const created = await api.post<Order>("/orders", {
++      customerId: "cus-1",
++      items,
++      note: "Leave at the door.",
++    });
++    expect(created.status).toBe(201);
++    expect((await api.view(created.body.id)).note).toBe("Leave at the door.");
++  });
++
++  it("accepts a note of exactly 200 characters", async () => {
++    const api = createTestApi();
++    const created = await api.post("/orders", {
++      customerId: "cus-1",
++      items,
++      note: "a".repeat(200),
++    });
++    expect(created.status).toBe(201);
++  });
++
++  it("rejects a note longer than 200 characters", async () => {
++    const api = createTestApi();
++    const created = await api.post("/orders", {
++      customerId: "cus-1",
++      items,
++      note: "a".repeat(201),
++    });
++    expect(created.status).toBe(400);
++  });
++
++  it("rejects a note that is not a string", async () => {
++    const api = createTestApi();
++    const created = await api.post("/orders", {
++      customerId: "cus-1",
++      items,
++      note: 5,
++    });
++    expect(created.status).toBe(400);
++  });
++});
++
++describe("admin order filter", () => {
++  it("returns only the requested customer's orders", async () => {
++    const api = createTestApi();
++    await api.createOrder("cus-1");
++    await api.createOrder("cus-2");
++    await api.createOrder("cus-1");
++    const list = await api.get<OrderView[]>("/admin/orders?customerId=cus-1");
++    expect(list.body).toHaveLength(2);
++    expect(list.body.every((o) => o.customerId === "cus-1")).toBe(true);
++  });
++
++  it("returns an empty list for an unknown customer", async () => {
++    const api = createTestApi();
++    await api.createOrder("cus-1");
++    const list = await api.get<OrderView[]>("/admin/orders?customerId=nobody");
++    expect(list.body).toEqual([]);
++  });
++});
++
++describe("health", () => {
++  it("reports the number of orders", async () => {
++    const api = createTestApi();
++    expect((await api.get("/health")).body).toEqual({ ok: true, orders: 0 });
++    await api.createOrder();
++    expect((await api.get("/health")).body).toEqual({ ok: true, orders: 1 });
++  });
++});
