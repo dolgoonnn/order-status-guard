@@ -1,0 +1,114 @@
+diff --git a/src/app.ts b/src/app.ts
+index 9b13d80..9edeefc 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -12,6 +12,7 @@ import {
+   cancelOrderAsCustomer,
+   createOrder,
+   markOrderReady,
++  reopenOrder,
+ } from "./services/order.service.js";
+ import { handleInvoicePaid } from "./services/payment.service.js";
+ import type { Db, OrderItem } from "./store.js";
+@@ -85,6 +86,10 @@ export function createApp(db: Db): Hono {
+     c.json(cancelOrderAsAdmin(db, c.req.param("id"))),
+   );
+ 
++  app.post("/admin/orders/:id/reopen", (c) =>
++    c.json(reopenOrder(db, c.req.param("id"))),
++  );
++
+   app.post("/admin/runs", async (c) => {
+     const body: unknown = await c.req.json();
+     const orderIds = isRecord(body) ? body.orderIds : undefined;
+diff --git a/src/domain/status.ts b/src/domain/status.ts
+index 0a40059..3d52c2b 100644
+--- a/src/domain/status.ts
++++ b/src/domain/status.ts
+@@ -28,6 +28,7 @@ export const TRANSITIONS = {
+   pickUp: { from: ["DISPATCHED"], to: "IN_TRANSIT" },
+   deliver: { from: ["IN_TRANSIT"], to: "DELIVERED" },
+   cancel: { from: ["PENDING", "PAID", "READY"], to: "CANCELLED" },
++  reopen: { from: ["CANCELLED"], to: "PENDING" },
+ } as const satisfies Record<string, Transition>;
+ 
+ export type TransitionName = keyof typeof TRANSITIONS;
+diff --git a/src/services/order.service.ts b/src/services/order.service.ts
+index beb472c..b331704 100644
+--- a/src/services/order.service.ts
++++ b/src/services/order.service.ts
+@@ -47,3 +47,8 @@ export function cancelOrderAsAdmin(db: Db, orderId: string): Order {
+   }
+   return changeStatusForHuman(db, order.id, "cancel");
+ }
++
++/** Admin reopens a cancelled order (for example a mistaken cancel). */
++export function reopenOrder(db: Db, orderId: string): Order {
++  return changeStatusForHuman(db, orderId, "reopen");
++}
+diff --git a/tests/every-caller.test.ts b/tests/every-caller.test.ts
+index b32c5ae..cacded7 100644
+--- a/tests/every-caller.test.ts
++++ b/tests/every-caller.test.ts
+@@ -79,6 +79,13 @@ const CALLERS: Caller[] = [
+     path: (orderId) => `/orders/${orderId}/cancel`,
+     body: () => ({ customerId: "cus-1" }),
+   },
++  {
++    name: "admin: reopen order",
++    kind: "human",
++    transition: "reopen",
++    path: (orderId) => `/admin/orders/${orderId}/reopen`,
++    body: () => ({}),
++  },
+   {
+     name: "admin: mark ready",
+     kind: "human",
+diff --git a/tests/reopen.test.ts b/tests/reopen.test.ts
+new file mode 100644
+index 0000000..859067b
+--- /dev/null
++++ b/tests/reopen.test.ts
+@@ -0,0 +1,42 @@
++import { describe, expect, it } from "vitest";
++import { createTestApi, type Order } from "./helpers.js";
++
++describe("admin reopen", () => {
++  it("moves a cancelled order back to PENDING", async () => {
++    const api = createTestApi();
++    const order = await api.createOrder("cus-1");
++    await api.post(`/orders/${order.id}/cancel`, { customerId: "cus-1" });
++    expect((await api.view(order.id)).status).toBe("CANCELLED");
++
++    const reopened = await api.post<Order>(`/admin/orders/${order.id}/reopen`);
++    expect(reopened.status).toBe(200);
++    expect(reopened.body.status).toBe("PENDING");
++    expect((await api.view(order.id)).status).toBe("PENDING");
++  });
++
++  it("refuses with 409 when the order is not cancelled", async () => {
++    const api = createTestApi();
++    const order = await api.createOrder();
++    const response = await api.post<{ error: string }>(
++      `/admin/orders/${order.id}/reopen`,
++    );
++    expect(response.status).toBe(409);
++    expect(typeof response.body.error).toBe("string");
++    expect((await api.view(order.id)).status).toBe("PENDING");
++  });
++
++  it("answers 404 for an unknown order", async () => {
++    const api = createTestApi();
++    const response = await api.post("/admin/orders/nope/reopen");
++    expect(response.status).toBe(404);
++  });
++
++  it("lets a reopened order be paid again", async () => {
++    const api = createTestApi();
++    const order = await api.createOrder();
++    await api.post(`/admin/orders/${order.id}/cancel`);
++    await api.post(`/admin/orders/${order.id}/reopen`);
++    await api.post("/internal/payments/invoice-paid", { orderId: order.id });
++    expect((await api.view(order.id)).status).toBe("PAID");
++  });
++});
