@@ -1,4 +1,9 @@
-import type { OrderStatus } from "./domain/status.js";
+import {
+  canFire,
+  nextStatus,
+  type OrderStatus,
+  type TransitionName,
+} from "./domain/status.js";
 
 export interface OrderItem {
   sku: string;
@@ -13,6 +18,16 @@ export interface Order {
   runId: string | null;
   createdAt: string;
 }
+
+/** Fields a general update may change. `status` is deliberately excluded. */
+export type OrderPatch = Partial<Omit<Order, "id" | "status">> & {
+  status?: never;
+};
+
+export type TransitionResult =
+  | { applied: true; order: Order }
+  | { applied: false; reason: "not_found" }
+  | { applied: false; reason: "illegal"; order: Order };
 
 export type RunState = "DISPATCHED" | "CANCELLED";
 
@@ -38,10 +53,53 @@ export class Db {
     return `${prefix}-${String(this.sequence).padStart(4, "0")}`;
   }
 
+  /** Creation only: refuses an id that exists, so it cannot rewrite a status. */
   insertOrder(order: Order, items: OrderItem[]): void {
     this.queryCount += 1;
+    if (this.orders.has(order.id)) {
+      throw new Error(`Order ${order.id} already exists`);
+    }
     this.orders.set(order.id, { ...order });
     this.items.set(order.id, items.map((item) => ({ ...item })));
+  }
+
+  /** Creates an order in its initial status. */
+  createOrder(input: { customerId: string; items: OrderItem[] }): Order {
+    const order: Order = {
+      id: this.nextId("ord"),
+      customerId: input.customerId,
+      status: "PENDING",
+      runId: null,
+      createdAt: new Date().toISOString(),
+    };
+    this.insertOrder(order, input.items);
+    return order;
+  }
+
+  /**
+   * THE ONLY WRITER of `Order.status` after creation (AGENTS.md rule 1).
+   * Compare-and-set in one store operation: the move happens only if the
+   * order's current status is a legal start for `name`; otherwise nothing is
+   * written. `patch` carries other fields (never `status`) in the same write.
+   */
+  transition(
+    id: string,
+    name: TransitionName,
+    patch: OrderPatch = {},
+  ): TransitionResult {
+    this.queryCount += 1;
+    const current = this.orders.get(id);
+    if (!current) return { applied: false, reason: "not_found" };
+    if (!canFire(current.status, name)) {
+      return { applied: false, reason: "illegal", order: { ...current } };
+    }
+    const updated: Order = {
+      ...current,
+      ...patch,
+      status: nextStatus(current.status, name),
+    };
+    this.orders.set(id, updated);
+    return { applied: true, order: { ...updated } };
   }
 
   findOrder(id: string): Order | undefined {
@@ -60,14 +118,14 @@ export class Db {
     return (this.items.get(orderId) ?? []).map((item) => ({ ...item }));
   }
 
-  updateOrder(id: string, patch: Partial<Omit<Order, "id">>): void {
+  updateOrder(id: string, patch: OrderPatch): void {
     this.queryCount += 1;
     const order = this.orders.get(id);
     if (!order) throw new Error(`Order ${id} not found`);
     this.orders.set(id, { ...order, ...patch });
   }
 
-  updateOrders(ids: string[], patch: Partial<Omit<Order, "id">>): void {
+  updateOrders(ids: string[], patch: OrderPatch): void {
     this.queryCount += 1;
     for (const id of ids) {
       const order = this.orders.get(id);

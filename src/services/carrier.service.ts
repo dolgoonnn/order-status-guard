@@ -1,6 +1,7 @@
-import type { OrderStatus } from "../domain/status.js";
-import { NotAllowedError, NotFoundError } from "../errors.js";
-import type { Db, Order } from "../store.js";
+import type { TransitionName } from "../domain/status.js";
+import { NotFoundError } from "../errors.js";
+import type { Db } from "../store.js";
+import { changeStatusForEvent, type EventOutcome } from "./status-change.js";
 
 export const CARRIER_EVENTS = [
   "PICKED_UP",
@@ -10,10 +11,15 @@ export const CARRIER_EVENTS = [
 
 export type CarrierEvent = (typeof CARRIER_EVENTS)[number];
 
-const STATUS_BY_EVENT: Record<CarrierEvent, OrderStatus> = {
-  PICKED_UP: "IN_TRANSIT",
-  DELIVERED: "DELIVERED",
-  RETURNED_TO_DEPOT: "READY",
+/**
+ * RETURNED_TO_DEPOT has no move: READY means packed at our warehouse, and a
+ * parcel at the carrier's depot is not that. Returns need their own move in
+ * the graph, which is a separate decision.
+ */
+const TRANSITION_BY_EVENT: Record<CarrierEvent, TransitionName | null> = {
+  PICKED_UP: "pickUp",
+  DELIVERED: "deliver",
+  RETURNED_TO_DEPOT: null,
 };
 
 export function isCarrierEvent(value: unknown): value is CarrierEvent {
@@ -25,21 +31,23 @@ export function isCarrierEvent(value: unknown): value is CarrierEvent {
 
 /**
  * Called by the carrier's webhook. Carrier events can arrive late or out of
- * order.
+ * order; one with no legal move from the current status changes nothing and
+ * says so.
  */
 export function handleCarrierEvent(
   db: Db,
   orderId: string,
   event: CarrierEvent,
-): Order {
-  const order = db.findOrder(orderId);
-  if (!order) throw new NotFoundError("Order");
-  if (order.status === "CANCELLED") {
-    throw new NotAllowedError("Order is cancelled");
+): EventOutcome {
+  const transition = TRANSITION_BY_EVENT[event];
+  if (transition === null) {
+    const order = db.findOrder(orderId);
+    if (!order) throw new NotFoundError("Order");
+    return {
+      applied: false,
+      reason: `"${event}" has no move in the status graph`,
+      order,
+    };
   }
-  // SEEDED DEFECT A3: writes the mapped status directly instead of using the
-  // graph. A late PICKED_UP after DELIVERED moves the order back to IN_TRANSIT.
-  const status = STATUS_BY_EVENT[event];
-  db.updateOrder(order.id, { status });
-  return { ...order, status };
+  return changeStatusForEvent(db, orderId, transition);
 }
