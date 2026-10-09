@@ -17,6 +17,7 @@ pnpm install
 pnpm typecheck
 pnpm test
 pnpm measure baseline   # writes docs/results/baseline.md
+pnpm sql                # regenerates db/order_status_guard.sql from the graph
 pnpm dev                # http://localhost:3000
 ```
 
@@ -40,9 +41,26 @@ shows what a written rule alone is worth.
 
 ```
 src/domain/status.ts     the status graph: the only place that knows legal moves
+src/domain/status-sql.ts the same graph rendered as a Postgres trigger
+db/                      the generated trigger, and a script that checks it against Postgres
 src/store.ts             in-memory database that counts queries
 src/services/            one file per caller (customer, billing, carrier, admin)
 src/app.ts               HTTP routes
 tests/                   the tests that pass on the baseline
 scripts/measure.ts       measures the three problems; writes docs/results/
 ```
+
+## Three questions, three enforcers
+
+"Can't an agent still write a query that sets the status?" Three different
+questions hide in that one, and each has its own enforcer:
+
+| Question | Enforcer |
+|---|---|
+| Is the value valid? | The type (in a Prisma app, the enum). Free, and only stops typos. |
+| Is the move legal? | The graph, through one writer function, with a type, a scan test and a behaviour test behind it. What this repo is about. |
+| Who may write it? | Only the database: `db/order_status_guard.sql`, generated from the graph, checked against Postgres in `docs/results/db-trigger.md`. |
+
+Request bodies never choose a status either (`tests/body-status.test.ts`).
+The decision record (`docs/decisions/0001-single-status-writer.md`) has the
+reasoning.

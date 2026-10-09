@@ -32,6 +32,9 @@ a terminal `RETURNED` status.
   single writer needs no change.
 - `pnpm measure after` rewrites the tracked file `docs/results/after.md`.
   Commit the new numbers with your change.
+- Run `pnpm sql` and commit `db/order_status_guard.sql`; the graph is exported
+  as a Postgres trigger and `tests/status-sql.test.ts` fails until the file
+  matches. (Added 2026-10-09, after run 1, which did not have this step.)
 - Update `docs/decisions/0001-single-status-writer.md`: it currently says the
   "returned to depot" event is never applied and that the graph has seven
   states. Both change with this task.
@@ -57,7 +60,8 @@ a terminal `RETURNED` status.
 
 ## What we expect to learn from your run
 
-- How many files you had to touch (expected: four, plus new tests).
+- How many files you had to touch (expected: four, plus new tests, plus the
+  regenerated `db/order_status_guard.sql`).
 - Whether any check got in your way for the wrong reason.
 - Anything in the docs that was missing or wrong. Say so in your report.
 

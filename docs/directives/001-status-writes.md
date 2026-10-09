@@ -153,3 +153,26 @@ Additional acceptance criteria:
       not found.
 - [ ] `pnpm typecheck`, `pnpm test` and `pnpm measure after` still pass, with
       the same numbers as before.
+
+## Addendum, 2026-10-09: the writer question
+
+Added after review of the finished work. Requirements 1 to 11 stand.
+
+12. **A request body never chooses a status.** Every route picks the named
+    fields it needs; `status` in a body is ignored, not applied. Add a test
+    that sends `status` in a create, a service callback, a carrier event and a
+    human action, and asserts the graph's answer wins.
+13. **The graph is exported as a Postgres trigger.** A script renders
+    `db/order_status_guard.sql` from `TRANSITIONS`: a transitions table and a
+    `BEFORE UPDATE OF status` trigger that rejects any move not in the table.
+    A test fails if the committed file drifts from the graph. A verify script
+    runs the generated SQL against a real Postgres and tries every (from, to)
+    pair as raw SQL; record its output under `docs/results/`. The trigger is
+    not wired into this service (in-memory store); say so.
+
+Additional acceptance criteria:
+
+- [ ] `tests/body-status.test.ts` passes and covers the four kinds of request.
+- [ ] `pnpm sql` is idempotent; `tests/status-sql.test.ts` fails on drift.
+- [ ] `db/verify.sql` passes against Postgres; output recorded.
+- [ ] `pnpm measure after` numbers unchanged (0 illegal, 0 direct writes).
