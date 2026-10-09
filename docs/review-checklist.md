@@ -20,6 +20,10 @@ Use this for any change under `src/services/`, `src/store.ts` or
       nothing. A human action that isn't legal returns 409.
 - [ ] A new move was added to `src/domain/status.ts`, not worked around in a
       caller.
+- [ ] No route reads `status` from a request body. Routes pick named fields;
+      `tests/body-status.test.ts` still passes.
+- [ ] If `src/domain/status.ts` changed: `pnpm sql` was run and
+      `db/order_status_guard.sql` is in the diff.
 
 ## The checks themselves
 
